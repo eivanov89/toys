@@ -20,6 +20,7 @@
 #include <x86intrin.h>
 
 #include "future.h"
+#include "spinlock.h"
 
 //-----------------------------------------------------------------------------
 
@@ -69,7 +70,7 @@ private:
             auto maxNextWakeupDeadline = now + ClockResolution;
 
             {
-                std::lock_guard<std::mutex> lock(Mutex);
+                TSpinLock::TGuard guard(SpinLock);
                 while (!Timers.empty() && Timers.front().Deadline <= now) {
                     std::ranges::pop_heap(Timers, TTimer::DeadlineCompare);
                     expiredTimers.push_back(std::move(Timers.back()));
@@ -140,7 +141,7 @@ public:
         // Assume that when stopped, there will be no new requests to sleep
         auto deadline = Clock::now() + delta;
 
-        std::lock_guard<std::mutex> lock(Mutex);
+        TSpinLock::TGuard guard(SpinLock);
         auto& timer = Timers.emplace_back(deadline);
         auto future = timer.Promise.get_future();
         std::ranges::push_heap(Timers, TTimer::DeadlineCompare);
@@ -168,7 +169,7 @@ private:
     std::stop_token StopToken;
     std::jthread Thread;
     std::vector<TTimer> Timers;
-    std::mutex Mutex;
+    TSpinLock SpinLock;
     uint64_t RdtscPerMs = 0;  // Calibrated rdtsc cycles per millisecond
 };
 
@@ -628,7 +629,7 @@ int main(int argc, char* argv[]) {
 
     int numTimerThreads = 1;
     if (maxThreads >= 16) {
-        numTimerThreads = maxThreads / 8;
+        numTimerThreads = maxThreads / 4;
     }
 
     TTimerManager::GetInstance().Start(numTimerThreads);
