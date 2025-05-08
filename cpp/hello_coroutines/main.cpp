@@ -420,6 +420,61 @@ private:
     IReadyTaskQueue& TaskQueue;
 };
 
+template <typename T>
+class TSimpleCircularQueue {
+public:
+    explicit TSimpleCircularQueue()
+        : FirstEmpty(0)
+        , FirstUsed(0)
+        , Size(0)
+    {
+    }
+
+    void Resize(size_t capacity) {
+        Queue.resize(capacity);
+    }
+
+    bool TryPush(T&& item) {
+        if (Size == Queue.size()) {
+            return false;
+        }
+        Queue[FirstEmpty] = std::move(item);
+        std::exchange(item, nullptr);
+        FirstEmpty = (FirstEmpty + 1) % Queue.size();
+        ++Size;
+        return true;
+    }
+
+    bool TryPop(T& item) {
+        if (Size == 0) {
+            return false;
+        }
+        item = std::move(Queue[FirstUsed]);
+        std::exchange(Queue[FirstUsed], nullptr);
+        FirstUsed = (FirstUsed + 1) % Queue.size();
+        --Size;
+        return true;
+    }
+
+    size_t GetSize() const {
+        return Size;
+    }
+
+    bool IsEmpty() const {
+        return Size == 0;
+    }
+
+    bool IsFull() const {
+        return Size == Queue.size();
+    }
+
+private:
+    std::vector<T> Queue;
+    size_t FirstEmpty;
+    size_t FirstUsed;
+    size_t Size;
+};
+
 class TTerminalPool : public IReadyTaskQueue {
 public:
     TTerminalPool(std::stop_token st, int numTerminals, int numThreads)
@@ -428,6 +483,11 @@ public:
         , ThreadsData(numThreads)
     {
         TerminalStats.resize(numTerminals);
+
+        size_t maxTerminalsPerThread = (numTerminals + numThreads - 1)  / numThreads;
+        for (auto& threadData: ThreadsData) {
+            threadData.ReadyTerminals.Resize(maxTerminalsPerThread);
+        }
 
         Terminals.reserve(numTerminals);
         TerminalTasks.reserve(numTerminals);
@@ -452,7 +512,8 @@ public:
         auto& threadData = ThreadsData[index];
 
         TSpinLock::TGuard guard(threadData.ReadyTerminalsLock);
-        threadData.ReadyTerminals.emplace_back(std::move(handle));
+        threadData.ReadyTerminals.TryPush(std::move(handle));
+        std::exchange(handle, nullptr);
     }
 
     void Join() {
@@ -496,9 +557,10 @@ private:
             std::optional<TTerminalTask::TCoroHandle> handle;
             {
                 TSpinLock::TGuard guard(threadData.ReadyTerminalsLock);
-                if (!threadData.ReadyTerminals.empty()) {
-                    handle = std::move(threadData.ReadyTerminals.front());
-                    threadData.ReadyTerminals.pop_front();
+                TTerminalTask::TCoroHandle h;
+                if (threadData.ReadyTerminals.TryPop(h)) {
+                    handle = std::move(h);
+                    std::exchange(h, nullptr);
                 }
             }
 
@@ -514,7 +576,7 @@ private:
     struct alignas(64) TPerThreadData {
         TPerThreadData() = default;
         TSpinLock ReadyTerminalsLock;
-        std::deque<TTerminalTask::TCoroHandle> ReadyTerminals;
+        TSimpleCircularQueue<TTerminalTask::TCoroHandle> ReadyTerminals;
     };
 
 private:
