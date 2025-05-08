@@ -28,7 +28,6 @@ public:
         }
 
         Callbacks.clear();
-        CondVar.notify_all();
     }
 
     void AddCallback(Callback cb) {
@@ -40,20 +39,14 @@ public:
         }
     }
 
-    void Wait() {
-        std::unique_lock lock(Mutex);
-        CondVar.wait(lock, [this] { return IsSet; });
-    }
-
+    // TODO: throw exception if not set?
     T Get() {
         std::unique_lock lock(Mutex);
-        CondVar.wait(lock, [this] { return IsSet; });
         return *Value;
     }
 
 private:
     std::mutex Mutex;
-    std::condition_variable CondVar;
     std::optional<T> Value;
     bool IsSet = false;
     std::vector<Callback> Callbacks;
@@ -71,7 +64,6 @@ public:
             cb();
         }
         Callbacks.clear();
-        CondVar.notify_all();
     }
 
     void AddCallback(Callback cb) {
@@ -83,18 +75,12 @@ public:
         }
     }
 
-    void Wait() {
-        std::unique_lock lock(Mutex);
-        CondVar.wait(lock, [this] { return IsSet; });
-    }
-
+    // TODO: throw exception if not set?
     void Get() {
-        Wait();
     }
 
 private:
     std::mutex Mutex;
-    std::condition_variable CondVar;
     bool IsSet = false;
     std::vector<Callback> Callbacks;
 };
@@ -111,12 +97,6 @@ public:
     void Subscribe(Callback callback) {
         if (State) {
             State->AddCallback(std::move(callback));
-        }
-    }
-
-    void Wait() {
-        if (State) {
-            State->Wait();
         }
     }
 
@@ -163,12 +143,6 @@ public:
     void Subscribe(Callback callback) {
         if (State) {
             State->AddCallback(std::move(callback));
-        }
-    }
-
-    void Wait() {
-        if (State) {
-            State->Wait();
         }
     }
 
