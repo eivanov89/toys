@@ -451,7 +451,7 @@ public:
         auto index = threadHint % ThreadsData.size();
         auto& threadData = ThreadsData[index];
 
-        std::lock_guard<std::mutex> lock(threadData.ReadyTerminalsMutex);
+        TSpinLock::TGuard guard(threadData.ReadyTerminalsLock);
         threadData.ReadyTerminals.emplace_back(std::move(handle));
     }
 
@@ -495,7 +495,7 @@ private:
         while (!OwnThreadsStopSource.stop_requested()) {
             std::optional<TTerminalTask::TCoroHandle> handle;
             {
-                std::lock_guard<std::mutex> lock(threadData.ReadyTerminalsMutex);
+                TSpinLock::TGuard guard(threadData.ReadyTerminalsLock);
                 if (!threadData.ReadyTerminals.empty()) {
                     handle = std::move(threadData.ReadyTerminals.front());
                     threadData.ReadyTerminals.pop_front();
@@ -513,7 +513,7 @@ private:
 private:
     struct alignas(64) TPerThreadData {
         TPerThreadData() = default;
-        std::mutex ReadyTerminalsMutex;
+        TSpinLock ReadyTerminalsLock;
         std::deque<TTerminalTask::TCoroHandle> ReadyTerminals;
     };
 
