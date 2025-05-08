@@ -225,10 +225,13 @@ namespace std {
 
 //-----------------------------------------------------------------------------
 
+// Thread local storage for thread ID
+thread_local size_t CurrentThreadId = 0;
+
 class IReadyTaskQueue {
 public:
     virtual ~IReadyTaskQueue() = default;
-    virtual void TaskReady(TTerminalTask::TCoroHandle handle) = 0;
+    virtual void TaskReady(TTerminalTask::TCoroHandle handle, size_t threadHint) = 0;
 };
 
 template <typename T>
@@ -236,6 +239,7 @@ struct TSuspendWithFuture {
     TSuspendWithFuture(TFuture<T>& future, IReadyTaskQueue& taskQueue)
         : Future(future)
         , TaskQueue(taskQueue)
+        , ThreadId(CurrentThreadId)
     {}
 
     TSuspendWithFuture() = delete;
@@ -249,11 +253,11 @@ struct TSuspendWithFuture {
     void await_suspend(TTerminalTask::TCoroHandle handle) {
         if constexpr (std::is_void_v<T>) {
             Future.Subscribe([this, handle]() {
-                TaskQueue.TaskReady(handle);
+                TaskQueue.TaskReady(handle, ThreadId);
             });
         } else {
             Future.Subscribe([this, handle](T) {
-                TaskQueue.TaskReady(handle);
+                TaskQueue.TaskReady(handle, ThreadId);
             });
         }
     }
@@ -264,6 +268,7 @@ struct TSuspendWithFuture {
 
     TFuture<T>& Future;
     IReadyTaskQueue& TaskQueue;
+    size_t ThreadId;
 };
 
 //-----------------------------------------------------------------------------
@@ -322,20 +327,21 @@ public:
         for (int i = 0; i < numTerminals; ++i) {
             auto& terminal = Terminals.emplace_back(PoolStopToken, i, TerminalStats[i], *this);
             auto& task = TerminalTasks.emplace_back(terminal.GetRunCoroutine());
-            ThreadsData[i % ThreadsData.size()].ReadyTerminals.emplace_back(task.Coro);
+            TaskReady(task.Coro, i);
         }
 
         // Create worker threads
         Threads.reserve(numThreads);
         for (int i = 0; i < numThreads; ++i) {
             Threads.emplace_back([this, i]() {
+                CurrentThreadId = i;
                 RunThread(i);
             });
         }
     }
 
-    void TaskReady(TTerminalTask::TCoroHandle handle) override {
-        auto index = ThreadsRR.fetch_add(1, std::memory_order_relaxed) % ThreadsData.size();
+    void TaskReady(TTerminalTask::TCoroHandle handle, size_t threadHint) override {
+        auto index = threadHint % ThreadsData.size();
         auto& threadData = ThreadsData[index];
 
         std::lock_guard<std::mutex> lock(threadData.ReadyTerminalsMutex);
@@ -416,7 +422,6 @@ private:
 
     std::vector<std::thread> Threads;
     std::vector<TPerThreadData> ThreadsData;
-    std::atomic<size_t> ThreadsRR{0};
 };
 
 //-----------------------------------------------------------------------------
