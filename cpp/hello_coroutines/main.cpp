@@ -62,9 +62,11 @@ private:
 
     void Run() {
         bool isEmpty = false;
+        std::vector<TTimer> expiredTimers;
+        expiredTimers.reserve(1000);
         while (!StopToken.stop_requested() || !isEmpty) {
             auto now = Clock::now();
-            std::vector<TTimer> expiredTimers;
+            auto maxNextWakeupDeadline = now + ClockResolution;
 
             {
                 std::lock_guard<std::mutex> lock(Mutex);
@@ -73,6 +75,10 @@ private:
                     expiredTimers.push_back(std::move(Timers.back()));
                     Timers.pop_back();
                 }
+                if (!Timers.empty()) {
+                    auto nextDeadline = Timers.front().Deadline;
+                    maxNextWakeupDeadline = std::min(maxNextWakeupDeadline, nextDeadline);
+                }
                 isEmpty = Timers.empty();
             }
 
@@ -80,19 +86,9 @@ private:
             for (auto& timer: expiredTimers) {
                 timer.Promise.SetValue();
             }
+            expiredTimers.clear();
 
-            std::chrono::microseconds sleepTime = ClockResolution;
-            {
-                std::lock_guard<std::mutex> lock(Mutex);
-                if (!Timers.empty()) {
-                    auto nextDeadline = Timers.front().Deadline;
-                    sleepTime = std::min(
-                        std::chrono::duration_cast<std::chrono::microseconds>(nextDeadline - now),
-                        ClockResolution
-                    );
-                }
-            }
-
+            std::chrono::microseconds sleepTime = std::chrono::duration_cast<std::chrono::microseconds>(maxNextWakeupDeadline - now);
             if (sleepTime < BusyWaitThreshold) {
                 BusyWait(sleepTime);
             } else {
