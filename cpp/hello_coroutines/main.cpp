@@ -17,12 +17,14 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <x86intrin.h>
 
 #include "future.h"
 
 //-----------------------------------------------------------------------------
 
 constexpr static std::chrono::duration ClockResolution = std::chrono::microseconds(50);
+constexpr static std::chrono::duration BusyWaitThreshold = std::chrono::milliseconds(1);
 
 // Workers execute "tasks": each task sleeps and then performs NumberOfAsyncRequestsPerTask requests.
 // With these constants, any task should take 1 ms, so that a worker should do 1000 tasks per second.
@@ -41,6 +43,41 @@ private:
     TTimerThread(std::stop_token st)
         : StopToken(st)
     {
+    }
+
+    static uint64_t Rdtsc() {
+        return __rdtsc();
+    }
+
+    void CalibrateRdtsc() {
+        constexpr int NumSamples = 100;
+        std::vector<uint64_t> samples;
+        samples.reserve(NumSamples);
+
+        // Collect samples
+        for (int i = 0; i < NumSamples; ++i) {
+            auto start = Rdtsc();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            auto end = Rdtsc();
+            samples.push_back(end - start);
+        }
+
+        // Calculate median
+        std::sort(samples.begin(), samples.end());
+        RdtscPerMs = samples[NumSamples / 2];
+    }
+
+    void BusyWait(std::chrono::microseconds duration) {
+        if (duration <= std::chrono::microseconds::zero()) {
+            return;
+        }
+
+        uint64_t start = Rdtsc();
+        uint64_t target = start + (duration.count() * RdtscPerMs / 1000);
+
+        while (Rdtsc() < target) {
+            _mm_pause();  // CPU yield instruction
+        }
     }
 
     void Run() {
@@ -75,12 +112,18 @@ private:
                     );
                 }
             }
-            std::this_thread::sleep_for(sleepTime);
+
+            if (sleepTime < BusyWaitThreshold) {
+                BusyWait(sleepTime);
+            } else {
+                std::this_thread::sleep_for(sleepTime);
+            }
         }
     }
 
 public:
     void Start() {
+        CalibrateRdtsc();
         Thread = std::jthread([this]() {
             Run();
         });
@@ -135,6 +178,7 @@ private:
     std::jthread Thread;
     std::vector<TTimer> Timers;
     std::mutex Mutex;
+    uint64_t RdtscPerMs = 0;  // Calibrated rdtsc cycles per millisecond
 };
 
 std::stop_source TTimerThread::GlobalStopSource;
