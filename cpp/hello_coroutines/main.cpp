@@ -34,37 +34,17 @@ constexpr static std::chrono::duration WorkerSleepBeforeFirstRequest = std::chro
 
 //-----------------------------------------------------------------------------
 
+// Thread local storage for thread ID
+thread_local size_t CurrentThreadId = 0;
+
+//-----------------------------------------------------------------------------
+
 // Our timer thread, which is used to handle async sleep requests
 
 class TTimerThread {
 private:
-    TTimerThread() = delete;
-
-    TTimerThread(std::stop_token st)
-        : StopToken(st)
-    {
-    }
-
     static uint64_t Rdtsc() {
         return __rdtsc();
-    }
-
-    void CalibrateRdtsc() {
-        constexpr int NumSamples = 100;
-        std::vector<uint64_t> samples;
-        samples.reserve(NumSamples);
-
-        // Collect samples
-        for (int i = 0; i < NumSamples; ++i) {
-            auto start = Rdtsc();
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            auto end = Rdtsc();
-            samples.push_back(end - start);
-        }
-
-        // Calculate median
-        std::sort(samples.begin(), samples.end());
-        RdtscPerMs = samples[NumSamples / 2];
     }
 
     void BusyWait(std::chrono::microseconds duration) {
@@ -122,8 +102,33 @@ private:
     }
 
 public:
-    void Start() {
-        CalibrateRdtsc();
+    TTimerThread(std::stop_token st)
+        : StopToken(st)
+    {
+    }
+
+    TTimerThread(TTimerThread&& other) noexcept
+        : StopToken(std::move(other.StopToken))
+        , Thread(std::move(other.Thread))
+        , Timers(std::move(other.Timers))
+        , RdtscPerMs(other.RdtscPerMs)
+    {}
+
+    TTimerThread& operator=(TTimerThread&& other) noexcept {
+        if (this != &other) {
+            StopToken = std::move(other.StopToken);
+            Thread = std::move(other.Thread);
+            Timers = std::move(other.Timers);
+            RdtscPerMs = other.RdtscPerMs;
+        }
+        return *this;
+    }
+
+    TTimerThread(const TTimerThread&) = delete;
+    TTimerThread& operator=(const TTimerThread&) = delete;
+
+    void Start(uint64_t rdtscPerMs) {
+        RdtscPerMs = rdtscPerMs;
         Thread = std::jthread([this]() {
             Run();
         });
@@ -133,14 +138,6 @@ public:
         if (Thread.joinable()) {
             Thread.join();
         }
-    }
-
-    static std::stop_source& GetGlobalStopSource() {
-        return GlobalStopSource;
-    }
-
-    static TTimerThread& GetTimerThread() {
-        return GlobarTimerThread;
     }
 
     TFuture<void> AsyncSleep(const std::chrono::microseconds delta) {
@@ -172,8 +169,6 @@ private:
         TPromise<void> Promise;
     };
 
-    static std::stop_source GlobalStopSource;
-    static TTimerThread GlobarTimerThread;
     std::stop_token StopToken;
     std::jthread Thread;
     std::vector<TTimer> Timers;
@@ -181,8 +176,82 @@ private:
     uint64_t RdtscPerMs = 0;  // Calibrated rdtsc cycles per millisecond
 };
 
-std::stop_source TTimerThread::GlobalStopSource;
-TTimerThread TTimerThread::GlobarTimerThread{GlobalStopSource.get_token()};
+class TTimerManager {
+public:
+    static TTimerManager& GetInstance() {
+        static TTimerManager instance;
+        return instance;
+    }
+
+    void Start(size_t numThreads) {
+        if (Started) {
+            return;
+        }
+
+        CalibrateRdtsc();
+        Threads.reserve(numThreads);
+        for (size_t i = 0; i < numThreads; ++i) {
+            Threads.emplace_back(StopSource.get_token());
+            Threads.back().Start(RdtscPerMs);
+        }
+        Started = true;
+    }
+
+    void Stop() {
+        if (!Started) {
+            return;
+        }
+        StopSource.request_stop();
+        for (auto& thread : Threads) {
+            thread.Join();
+        }
+        Started = false;
+    }
+
+    TFuture<void> AsyncSleep(const std::chrono::microseconds delta) {
+        if (!Started) {
+            throw std::runtime_error("TimerManager not started");
+        }
+        return Threads[CurrentThreadId % Threads.size()].AsyncSleep(delta);
+    }
+
+    std::stop_source& GetStopSource() {
+        return StopSource;
+    }
+
+private:
+    TTimerManager() = default;
+    ~TTimerManager() {
+        Stop();
+    }
+
+    static uint64_t Rdtsc() {
+        return __rdtsc();
+    }
+
+    void CalibrateRdtsc() {
+        constexpr int NumSamples = 100;
+        std::vector<uint64_t> samples;
+        samples.reserve(NumSamples);
+
+        // Collect samples
+        for (int i = 0; i < NumSamples; ++i) {
+            auto start = Rdtsc();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            auto end = Rdtsc();
+            samples.push_back(end - start);
+        }
+
+        // Calculate median
+        std::sort(samples.begin(), samples.end());
+        RdtscPerMs = samples[NumSamples / 2];
+    }
+
+    std::stop_source StopSource;
+    std::vector<TTimerThread> Threads;
+    uint64_t RdtscPerMs = 0;
+    bool Started = false;
+};
 
 //-----------------------------------------------------------------------------
 
@@ -191,7 +260,7 @@ TTimerThread TTimerThread::GlobarTimerThread{GlobalStopSource.get_token()};
 TFuture<long> DoAsyncRequest() {
     static std::atomic<long> Value = 0;
 
-    auto sleepFuture = TTimerThread::GetTimerThread().AsyncSleep(AsyncRequestDuration);
+    auto sleepFuture = TTimerManager::GetInstance().AsyncSleep(AsyncRequestDuration);
     TPromise<long> resultPromise;
     auto resultFuture = resultPromise.get_future();
 
@@ -269,9 +338,6 @@ namespace std {
 
 //-----------------------------------------------------------------------------
 
-// Thread local storage for thread ID
-thread_local size_t CurrentThreadId = 0;
-
 class IReadyTaskQueue {
 public:
     virtual ~IReadyTaskQueue() = default;
@@ -334,7 +400,7 @@ public:
         while (!StopToken.stop_requested()) {
             // initial sleep
             //std::cout << "terminal goes to sleep\n";
-            auto sleepFuture = TTimerThread::GetTimerThread().AsyncSleep(WorkerSleepBeforeFirstRequest);
+            auto sleepFuture = TTimerManager::GetInstance().AsyncSleep(WorkerSleepBeforeFirstRequest);
             co_await TSuspendWithFuture<void>{sleepFuture, TaskQueue};
             //std::cout << "terminal goes to run requests\n";
 
@@ -470,9 +536,7 @@ private:
 
 //-----------------------------------------------------------------------------
 
-void RunBenchmark(int maxThreads, int numTerminals, int interval) {
-    int numThreads = std::min(maxThreads, numTerminals);
-
+void RunBenchmark(int numThreads, int numTerminals, int interval) {
     std::stop_source stopSource;
     TTerminalPool pool(stopSource.get_token(), numTerminals, numThreads);
 
@@ -566,21 +630,27 @@ int main(int argc, char* argv[]) {
         std::cout << "Using " << maxThreads << " threads\n";
     }
 
-    TTimerThread::GetTimerThread().Start();
+    int numTimerThreads = 1;
+    if (maxThreads >= 16) {
+        numTimerThreads = maxThreads / 8;
+    }
 
-    int maxTerminalThreads = std::max(1, maxThreads - 1); // 1 thread for timer
+    TTimerManager::GetInstance().Start(numTimerThreads);
+
+    int maxTerminalThreads = std::max(1, maxThreads - numTimerThreads);
+    maxTerminalThreads = std::min(maxTerminalThreads, numTerminals);
 
     if (multiRun) {
         for (int n = 1; n <= numTerminals; n *= 2) {
-            RunBenchmark(maxTerminalThreads, n, interval);
+            int currentTerminalThreads = std::min(maxTerminalThreads, n);
+            RunBenchmark(currentTerminalThreads, n, interval);
         }
     } else {
         RunBenchmark(maxTerminalThreads, numTerminals, interval);
     }
 
     // Stop timer thread and the rest
-    TTimerThread::GetGlobalStopSource().request_stop();
-    TTimerThread::GetTimerThread().Join();
+    TTimerManager::GetInstance().Stop();
 
     return 0;
 }
