@@ -69,18 +69,26 @@ private:
             auto now = Clock::now();
             auto maxNextWakeupDeadline = now + ClockResolution;
 
+            std::vector<TTimer> newTimers;
+            newTimers.reserve(1000);
             {
                 TSpinLock::TGuard guard(SpinLock);
-                while (!Timers.empty() && Timers.front().Deadline <= now) {
-                    std::ranges::pop_heap(Timers, TTimer::DeadlineCompare);
-                    expiredTimers.push_back(std::move(Timers.back()));
-                    Timers.pop_back();
+                if (!UnsortedTimers.empty()) {
+                    std::swap(newTimers, UnsortedTimers);
                 }
-                if (!Timers.empty()) {
-                    auto nextDeadline = Timers.front().Deadline;
-                    maxNextWakeupDeadline = std::min(maxNextWakeupDeadline, nextDeadline);
+            }
+
+            if (!newTimers.empty()) {
+                for (auto& timer: newTimers) {
+                    Timers.push_back(std::move(timer));
                 }
-                isEmpty = Timers.empty();
+                std::ranges::make_heap(Timers, TTimer::DeadlineCompare);
+            }
+
+            while (!Timers.empty() && Timers.front().Deadline <= now) {
+                std::ranges::pop_heap(Timers, TTimer::DeadlineCompare);
+                expiredTimers.push_back(std::move(Timers.back()));
+                Timers.pop_back();
             }
 
             // Process expired timers outside the lock
@@ -88,6 +96,12 @@ private:
                 timer.Promise.SetValue();
             }
             expiredTimers.clear();
+
+            isEmpty = Timers.empty();
+            if (!isEmpty) {
+                auto nextDeadline = Timers.front().Deadline;
+                maxNextWakeupDeadline = std::min(maxNextWakeupDeadline, nextDeadline);
+            }
 
             std::chrono::microseconds sleepTime = std::chrono::duration_cast<std::chrono::microseconds>(maxNextWakeupDeadline - now);
             if (sleepTime < BusyWaitThreshold) {
@@ -142,9 +156,8 @@ public:
         auto deadline = Clock::now() + delta;
 
         TSpinLock::TGuard guard(SpinLock);
-        auto& timer = Timers.emplace_back(deadline);
+        auto& timer = UnsortedTimers.emplace_back(deadline);
         auto future = timer.Promise.get_future();
-        std::ranges::push_heap(Timers, TTimer::DeadlineCompare);
 
         return future;
     }
@@ -168,6 +181,7 @@ private:
 
     std::stop_token StopToken;
     std::jthread Thread;
+    std::vector<TTimer> UnsortedTimers;
     std::vector<TTimer> Timers;
     TSpinLock SpinLock;
     uint64_t RdtscPerMs = 0;  // Calibrated rdtsc cycles per millisecond
