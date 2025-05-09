@@ -437,7 +437,7 @@ private:
 template <typename T>
 class TSimpleCircularQueue {
 public:
-    explicit TSimpleCircularQueue()
+    TSimpleCircularQueue()
         : FirstEmpty(0)
         , FirstUsed(0)
         , Size(0)
