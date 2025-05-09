@@ -453,7 +453,6 @@ public:
             return false;
         }
         Queue[FirstEmpty] = std::move(item);
-        std::exchange(item, nullptr);
         FirstEmpty = (FirstEmpty + 1) % Queue.size();
         ++Size;
         return true;
@@ -464,7 +463,6 @@ public:
             return false;
         }
         item = std::move(Queue[FirstUsed]);
-        std::exchange(Queue[FirstUsed], nullptr);
         FirstUsed = (FirstUsed + 1) % Queue.size();
         --Size;
         return true;
@@ -527,7 +525,6 @@ public:
 
         TSpinLock::TGuard guard(threadData.ReadyTerminalsLock);
         threadData.ReadyTerminals.TryPush(std::move(handle));
-        std::exchange(handle, nullptr);
     }
 
     void Join() {
@@ -574,7 +571,6 @@ private:
                 TTerminalTask::TCoroHandle h;
                 if (threadData.ReadyTerminals.TryPop(h)) {
                     handle = std::move(h);
-                    std::exchange(h, nullptr);
                 }
             }
 
