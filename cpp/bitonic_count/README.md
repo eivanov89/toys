@@ -17,6 +17,19 @@ CC=clang-18 CXX=clang++-18 cmake -DCMAKE_BUILD_TYPE=Release ..
 cmake --build . -j
 ```
 
+On MacOS I have to build slightly differently:
+```
+brew install llvm
+
+mkdir -p build && cd build
+SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+cmake -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_OSX_SYSROOT="$SDKROOT" \
+  -DCMAKE_C_COMPILER="$(brew --prefix)/opt/llvm/bin/clang" \
+  -DCMAKE_CXX_COMPILER="$(brew --prefix)/opt/llvm/bin/clang++" ..
+cmake --build . -j
+```
+
 This produces two executables:
 
 - `bitonic_count` (from `main.cpp`): microbenchmark
@@ -90,3 +103,23 @@ The "own" scales linearly with the number of threads. The rest behave in an inte
 ![Bitonic benchmark (Intel 64)](img/bitonic_intel_64.png)
 
 But it is clear that bitonic (at least a quick implementation) is slower than regular shared atomic.
+
+### Macbook M1
+
+It has just 8 cores. I installed Homebrew clang version 21.1.4.
+
+Raw data:
+```
+threads,atomic,bitonic,own
+2,190146161,32179803,905388088
+4,94499501,23618843,1772210479
+8,44350594,12820394,2786973564
+```
+
+Plot:
+![Bitonic benchmark (Intel 64)](img/bitonic_m1.png)
+
+
+### Bonus: M1 vs. Intel Xeon atomic increments
+
+![Atomic benchmark](img/m1_vs_xeon_atomics.png)
