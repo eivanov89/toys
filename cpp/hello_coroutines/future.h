@@ -1,53 +1,81 @@
 #pragma once
 
 #include <condition_variable>
+#include <exception>
 #include <functional>
 #include <mutex>
 #include <optional>
 #include <vector>
 #include <memory>
 
-// Default future doesn't have Apply(), which we need
-// Note, that callback set in Apply() is called in a thread setting
-// the value (in our case this is the timer thread)
-//
-// As expected, this is quick and dirty draft implementation
-
 template <typename T>
 class TSharedState {
 public:
-    using Callback = std::function<void(T)>;
+    using Callback = std::function<void()>;
 
     template <typename TT>
     void SetValue(TT&& value) {
-        std::lock_guard lock(Mutex);
-        Value = std::forward<TT>(value);
-        IsSet = true;
-        for (auto& cb : Callbacks) {
-            cb(*Value);
+        std::vector<Callback> toCall;
+        {
+            std::lock_guard lock(Mutex);
+            Value = std::forward<TT>(value);
+            IsSet = true;
+            toCall.swap(Callbacks);
+            CV.notify_all();
         }
+        for (auto& cb : toCall) {
+            cb();
+        }
+    }
 
-        Callbacks.clear();
+    void SetException(std::exception_ptr ex) {
+        std::vector<Callback> toCall;
+        {
+            std::lock_guard lock(Mutex);
+            Exception = std::move(ex);
+            IsSet = true;
+            toCall.swap(Callbacks);
+            CV.notify_all();
+        }
+        for (auto& cb : toCall) {
+            cb();
+        }
     }
 
     void AddCallback(Callback cb) {
-        std::lock_guard lock(Mutex);
-        if (IsSet) {
-            cb(*Value);
-        } else {
-            Callbacks.push_back(std::move(cb));
+        bool ready = false;
+        {
+            std::lock_guard lock(Mutex);
+            if (IsSet) {
+                ready = true;
+            } else {
+                Callbacks.push_back(std::move(cb));
+            }
+        }
+        if (ready) {
+            cb();
         }
     }
 
-    // TODO: throw exception if not set?
+    bool Ready() const {
+        std::lock_guard lock(Mutex);
+        return IsSet;
+    }
+
     T Get() {
         std::unique_lock lock(Mutex);
-        return *Value;
+        CV.wait(lock, [this] { return IsSet; });
+        if (Exception) {
+            std::rethrow_exception(Exception);
+        }
+        return std::move(*Value);
     }
 
 private:
-    std::mutex Mutex;
+    mutable std::mutex Mutex;
+    std::condition_variable CV;
     std::optional<T> Value;
+    std::exception_ptr Exception;
     bool IsSet = false;
     std::vector<Callback> Callbacks;
 };
@@ -58,29 +86,64 @@ public:
     using Callback = std::function<void()>;
 
     void SetValue() {
-        std::lock_guard lock(Mutex);
-        IsSet = true;
-        for (auto& cb : Callbacks) {
+        std::vector<Callback> toCall;
+        {
+            std::lock_guard lock(Mutex);
+            IsSet = true;
+            toCall.swap(Callbacks);
+            CV.notify_all();
+        }
+        for (auto& cb : toCall) {
             cb();
         }
-        Callbacks.clear();
+    }
+
+    void SetException(std::exception_ptr ex) {
+        std::vector<Callback> toCall;
+        {
+            std::lock_guard lock(Mutex);
+            Exception = std::move(ex);
+            IsSet = true;
+            toCall.swap(Callbacks);
+            CV.notify_all();
+        }
+        for (auto& cb : toCall) {
+            cb();
+        }
     }
 
     void AddCallback(Callback cb) {
-        std::lock_guard lock(Mutex);
-        if (IsSet) {
+        bool ready = false;
+        {
+            std::lock_guard lock(Mutex);
+            if (IsSet) {
+                ready = true;
+            } else {
+                Callbacks.push_back(std::move(cb));
+            }
+        }
+        if (ready) {
             cb();
-        } else {
-            Callbacks.push_back(std::move(cb));
         }
     }
 
-    // TODO: throw exception if not set?
+    bool Ready() const {
+        std::lock_guard lock(Mutex);
+        return IsSet;
+    }
+
     void Get() {
+        std::unique_lock lock(Mutex);
+        CV.wait(lock, [this] { return IsSet; });
+        if (Exception) {
+            std::rethrow_exception(Exception);
+        }
     }
 
 private:
-    std::mutex Mutex;
+    mutable std::mutex Mutex;
+    std::condition_variable CV;
+    std::exception_ptr Exception;
     bool IsSet = false;
     std::vector<Callback> Callbacks;
 };
@@ -91,7 +154,7 @@ public:
     using Callback = typename TSharedState<T>::Callback;
 
     TFuture(std::shared_ptr<TSharedState<T>> state)
-        : State(state)
+        : State(std::move(state))
     {}
 
     void Subscribe(Callback callback) {
@@ -100,11 +163,12 @@ public:
         }
     }
 
+    bool IsReady() const {
+        return State && State->Ready();
+    }
+
     T Get() {
-        if (State) {
-            return State->Get();
-        }
-        return T{};
+        return State->Get();
     }
 
 private:
@@ -118,13 +182,17 @@ public:
         : State(std::make_shared<TSharedState<T>>())
     {}
 
-    TFuture<T> get_future() {
+    TFuture<T> GetFuture() {
         return TFuture<T>(State);
     }
 
     template<typename TT>
     void SetValue(TT&& value) {
         State->SetValue(std::forward<TT>(value));
+    }
+
+    void SetException(std::exception_ptr ex) {
+        State->SetException(std::move(ex));
     }
 
 private:
@@ -137,13 +205,17 @@ public:
     using Callback = typename TSharedState<void>::Callback;
 
     TFuture(std::shared_ptr<TSharedState<void>> state)
-        : State(state)
+        : State(std::move(state))
     {}
 
     void Subscribe(Callback callback) {
         if (State) {
             State->AddCallback(std::move(callback));
         }
+    }
+
+    bool IsReady() const {
+        return State && State->Ready();
     }
 
     void Get() {
@@ -163,12 +235,16 @@ public:
         : State(std::make_shared<TSharedState<void>>())
     {}
 
-    TFuture<void> get_future() {
+    TFuture<void> GetFuture() {
         return TFuture<void>(State);
     }
 
     void SetValue() {
         State->SetValue();
+    }
+
+    void SetException(std::exception_ptr ex) {
+        State->SetException(std::move(ex));
     }
 
 private:
