@@ -157,7 +157,7 @@ public:
 
         TSpinLock::TGuard guard(SpinLock);
         auto& timer = UnsortedTimers.emplace_back(deadline);
-        auto future = timer.Promise.get_future();
+        auto future = timer.Promise.GetFuture();
 
         return future;
     }
@@ -273,7 +273,7 @@ TFuture<long> DoAsyncRequest() {
 
     auto sleepFuture = TTimerManager::GetInstance().AsyncSleep(AsyncRequestDuration);
     TPromise<long> resultPromise;
-    auto resultFuture = resultPromise.get_future();
+    auto resultFuture = resultPromise.GetFuture();
 
     sleepFuture.Subscribe([value = &Value, promise = std::move(resultPromise)]() mutable {
         promise.SetValue(value->fetch_add(1));
@@ -372,15 +372,9 @@ struct TSuspendWithFuture {
     }
 
     void await_suspend(TTerminalTask::TCoroHandle handle) {
-        if constexpr (std::is_void_v<T>) {
-            Future.Subscribe([this, handle]() {
-                TaskQueue.TaskReady(handle, ThreadId);
-            });
-        } else {
-            Future.Subscribe([this, handle](T) {
-                TaskQueue.TaskReady(handle, ThreadId);
-            });
-        }
+        Future.Subscribe([this, handle]() {
+            TaskQueue.TaskReady(handle, ThreadId);
+        });
     }
 
     T await_resume() {
